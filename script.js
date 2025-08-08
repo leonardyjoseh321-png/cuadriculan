@@ -7,22 +7,7 @@ const DB_NAME = 'RifasSucreDB';
 const DB_VERSION = 4; // Incrementa cuando hagas cambios
 let db;
 
-async function migrarDatosLocales() {
-    // Migrar códigos de localStorage a IndexedDB si existen
-    if (localStorage.getItem('codigosValidos')) {
-        const codigosLocal = JSON.parse(localStorage.getItem('codigosValidos') || []);
-        const tx = db.transaction(['codigos'], 'readwrite');
-        const store = tx.objectStore('codigos');
-        
-        await Promise.all(
-            codigosLocal.map(codigo => 
-                store.put(codigo)
-            )
-        );
-        
-        console.log('Códigos migrados de localStorage a IndexedDB');
-    }
-}
+
 
 // Llamar esta función después de inicializar la base de datos
 document.addEventListener('DOMContentLoaded', async () => {
@@ -274,8 +259,8 @@ let superusuarioActivo = false;
 let superusuarioTimeout = null;
 let filtroClientes = 'todos';
 let paginaActualClientes = 1;
-const clientesPorPagina = 10;let codigosValidos = JSON.parse(localStorage.getItem('codigosValidos') || "[]");
-let codigosUsados = JSON.parse(localStorage.getItem('codigosUsados') || "[]");
+let codigosValidos = [];
+let codigosUsados = [];
 
 // Configurar el manual de usuario
 const manualContent = `
@@ -452,17 +437,25 @@ async function initPersistentStorage() {
 async function migrarDatosLocales() {
     // Migrar solo si existe data vieja
     if (localStorage.getItem('codigosValidos')) {
-        const codigosLocal = JSON.parse(localStorage.getItem('codigosValidos') || "[]");
-        const tx = db.transaction('codigos', 'readwrite');
-        
-        await Promise.all(
-            codigosLocal.map(codigo => 
-                tx.objectStore('codigos').put(codigo)
-            )
-        );
-        
-        localStorage.removeItem('codigosValidos');
-    }
+    const codigosLocal = JSON.parse(localStorage.getItem('codigosValidos') || '[]');
+    const tx = db.transaction(['codigos'], 'readwrite');
+    const store = tx.objectStore('codigos');
+    
+    await Promise.all(
+        codigosLocal.map(codigo => 
+            store.put(codigo)
+        )
+    );
+    
+    console.log('Códigos migrados de localStorage a IndexedDB');
+    localStorage.removeItem('codigosValidos'); // Limpiar después de migrar
+}
+
+if (localStorage.getItem('codigosUsados')) {
+    const usadosLocal = JSON.parse(localStorage.getItem('codigosUsados') || '[]');
+    await guardarConfiguracion('codigosUsados', usadosLocal);
+    localStorage.removeItem('codigosUsados');
+}
 }
 
 // Elementos del DOM
@@ -595,16 +588,17 @@ function cargarFallbackLocalStorage() {
 async function guardarAcceso(codigo) {
     try {
         // Guardar en IndexedDB para persistencia
-        const tx = db.transaction(['configuracion'], 'readwrite');
-        const store = tx.objectStore('configuracion');
-        await store.put({ 
-            clave: 'ultimo_acceso', 
-            valor: codigo,
-            timestamp: new Date().toISOString()
-        });
+        await guardarConfiguracion('ultimo_acceso', codigo);
         
         // Guardar también en sessionStorage para la sesión actual
         sessionStorage.setItem('codigo_acceso_actual', codigo);
+        
+        // Marcar código como usado
+        const codigosUsados = await obtenerConfiguracion('codigosUsados') || [];
+        if (!codigosUsados.includes(codigo)) {
+            codigosUsados.push(codigo);
+            await guardarConfiguracion('codigosUsados', codigosUsados);
+        }
     } catch (error) {
         console.error("Error guardando acceso:", error);
         // Fallback a localStorage
@@ -614,23 +608,30 @@ async function guardarAcceso(codigo) {
 
 async function verificarAccesoPersistente() {
     try {
-        // 1. Intentar con IndexedDB primero
-        const tx = db.transaction(['configuracion'], 'readonly');
-        const store = tx.objectStore('configuracion');
-        const request = store.get('ultimo_acceso');
-        
-        const acceso = await new Promise((resolve) => {
-            request.onsuccess = () => resolve(request.result?.valor);
-            request.onerror = () => resolve(null);
-        });
-
-        if (acceso && await verificarCodigoEnDB(acceso)) {
+        // 1. Verificar sessionStorage primero (sesión actual)
+        const codigoSession = sessionStorage.getItem('codigo_acceso_actual');
+        if (codigoSession && await verificarCodigoEnDB(codigoSession)) {
             return true;
         }
         
-        // 2. Fallback a localStorage
+        // 2. Verificar IndexedDB (acceso persistente)
+        const codigoIndexedDB = await obtenerConfiguracion('ultimo_acceso');
+        if (codigoIndexedDB && await verificarCodigoEnDB(codigoIndexedDB)) {
+            // Restaurar sesión
+            sessionStorage.setItem('codigo_acceso_actual', codigoIndexedDB);
+            return true;
+        }
+        
+        // 3. Fallback a localStorage (para compatibilidad)
         const codigoLocal = localStorage.getItem('ultimo_acceso');
-        return codigoLocal && await verificarCodigoEnDB(codigoLocal);
+        if (codigoLocal && await verificarCodigoEnDB(codigoLocal)) {
+            // Migrar a IndexedDB
+            await guardarConfiguracion('ultimo_acceso', codigoLocal);
+            sessionStorage.setItem('codigo_acceso_actual', codigoLocal);
+            return true;
+        }
+        
+        return false;
     } catch (error) {
         console.error("Error verificando acceso:", error);
         return false;
@@ -638,58 +639,44 @@ async function verificarAccesoPersistente() {
 }
 
 async function verificarCodigoEnDB(codigo) {
-    return new Promise((resolve) => {
+    try {
         // Primero intentar con IndexedDB
         const tx = db.transaction(['codigos'], 'readonly');
         const store = tx.objectStore('codigos');
         const request = store.get(codigo);
 
-        request.onsuccess = () => {
-            const codigoObj = request.result;
-            if (!codigoObj) {
-                console.log('Código no encontrado en IndexedDB');
-                // Fallback a localStorage si es necesario
-                const codigosLocal = JSON.parse(localStorage.getItem('codigosValidos') || "[]");
-                const codigoLocal = codigosLocal.find(c => c.codigo === codigo);
-                
-                if (codigoLocal) {
-                    const ahora = new Date();
-                    const expiracion = new Date(codigoLocal.expiracion);
-                    resolve(ahora <= expiracion);
-                } else {
-                    resolve(false);
-                }
-                return;
-            }
+        const codigoObj = await new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(null);
+        });
 
-            const ahora = new Date();
-            const expiracion = new Date(codigoObj.expiracion);
-            
-            if (ahora > expiracion) {
-                console.log('Código expirado');
-                resolve(false);
-                return;
-            }
+        if (!codigoObj) {
+            console.log('Código no encontrado en IndexedDB');
+            return false;
+        }
 
-            console.log('Código válido');
-            resolve(true);
-        };
+        // Verificar expiración
+        const ahora = new Date();
+        const expiracion = new Date(codigoObj.expiracion);
+        
+        if (ahora > expiracion) {
+            console.log('Código expirado');
+            return false;
+        }
 
-        request.onerror = () => {
-            console.error('Error al verificar código en IndexedDB');
-            // Fallback a localStorage
-            const codigosLocal = JSON.parse(localStorage.getItem('codigosValidos') || "[]");
-            const codigoLocal = codigosLocal.find(c => c.codigo === codigo);
-            
-            if (codigoLocal) {
-                const ahora = new Date();
-                const expiracion = new Date(codigoLocal.expiracion);
-                resolve(ahora <= expiracion);
-            } else {
-                resolve(false);
-            }
-        };
-    });
+        // Verificar si ya fue usado
+        const codigosUsados = await obtenerConfiguracion('codigosUsados') || [];
+        if (codigosUsados.includes(codigo)) {
+            console.log('Código ya utilizado');
+            return false;
+        }
+
+        console.log('Código válido');
+        return true;
+    } catch (error) {
+        console.error('Error al verificar código:', error);
+        return false;
+    }
 }
 
 // Código de diagnóstico (puedes eliminarlo después)
@@ -2457,11 +2444,6 @@ async function generarCodigoAcceso() {
         const tx = db.transaction(['codigos'], 'readwrite');
         const store = tx.objectStore('codigos');
         await store.put(nuevoCodigo);
-        
-        // También guardar en localStorage como respaldo
-        const codigosLocal = JSON.parse(localStorage.getItem('codigosValidos') || '[]');
-        codigosLocal.push(nuevoCodigo);
-        localStorage.setItem('codigosValidos', JSON.stringify(codigosLocal));
         
         // Mostrar confirmación
         const codigoBox = document.getElementById('codigo-generado');
