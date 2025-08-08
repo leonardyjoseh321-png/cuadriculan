@@ -593,12 +593,7 @@ async function guardarAcceso(codigo) {
         // Guardar también en sessionStorage para la sesión actual
         sessionStorage.setItem('codigo_acceso_actual', codigo);
         
-        // Marcar código como usado
-        const codigosUsados = await obtenerConfiguracion('codigosUsados') || [];
-        if (!codigosUsados.includes(codigo)) {
-            codigosUsados.push(codigo);
-            await guardarConfiguracion('codigosUsados', codigosUsados);
-        }
+        console.log('Acceso guardado correctamente');
     } catch (error) {
         console.error("Error guardando acceso:", error);
         // Fallback a localStorage
@@ -661,13 +656,6 @@ async function verificarCodigoEnDB(codigo) {
         
         if (ahora > expiracion) {
             console.log('Código expirado');
-            return false;
-        }
-
-        // Verificar si ya fue usado
-        const codigosUsados = await obtenerConfiguracion('codigosUsados') || [];
-        if (codigosUsados.includes(codigo)) {
-            console.log('Código ya utilizado');
             return false;
         }
 
